@@ -1,27 +1,33 @@
+--// SERVICES
+-- these are core roblox systems. we cache them once so we dont keep asking for them later
 local Players = game:GetService("Players")
 local PathfindingService = game:GetService("PathfindingService")
-local RunService = game:GetService("RunService")
 
-local rig = script.Parent -- The Observer rig
+--// MAIN REFERENCES
+-- the npc itself and the remotes used to talk to the client
+local rig = script.Parent
 local Remotes = game.ReplicatedStorage:WaitForChild("Remotes")
 
-local DEBOUNCE_TIME = 3 -- seconds between attacks to prevent spam
+--// SETTINGS
+-- these control behavior, not logic. changing them changes how aggressive or aware the npc feels
+local DEBOUNCE_TIME = 3
 local VISION_DISTANCE = 40
 local ATTACK_DISTANCE = 5
 
+--// STATE
+-- these track what the npc is currently doing so it doesnt conflict with itself
 local debounce = false
-local currentTarget = nil
-local currentPath = nil
 local isMoving = false
 
--- === UTILITY FUNCTIONS === --
-
--- Print debug info safely
+--// DEBUG
+-- central print so if you remove debugging later, you only remove it here
 local function debugPrint(...)
 	print("[Observer AI]:", ...)
 end
 
--- Check if HumanoidRootPart exists
+--// CORE POSITION ACCESS
+-- everything in this script depends on positions. instead of trusting every model blindly,
+-- we safely extract the root part. if its missing, we stop early to avoid errors spreading
 local function getHRP(character)
 	if character and character:IsA("Model") then
 		return character:FindFirstChild("HumanoidRootPart")
@@ -29,245 +35,245 @@ local function getHRP(character)
 	return nil
 end
 
--- Raycast to check line of sight to target character
-local function checkForCharacter(character)
+--// LINE OF SIGHT CHECK
+-- distance alone is not enough. this function makes the npc "commit" to seeing something
+-- by verifying there is no obstruction between it and the target
+--
+-- the important idea here is: the npc only reacts to what it can confirm visually,
+-- not just what exists in range. this prevents it from feeling unfair
+local function canSee(character)
 	local myHRP = getHRP(rig)
 	local targetHRP = getHRP(character)
-	if not myHRP or not targetHRP then
-		debugPrint("Missing HRP on rig or target")
-		return false
-	end
 
-	local origin = myHRP.Position
-	local direction = (targetHRP.Position - origin).Unit * VISION_DISTANCE
+	if not myHRP or not targetHRP then return false end
 
-	local raycastParams = RaycastParams.new()
-	raycastParams.FilterDescendantsInstances = {rig}
-	raycastParams.FilterType = Enum.RaycastFilterType.Blacklist
+	local direction = (targetHRP.Position - myHRP.Position)
 
-	local rayResult = workspace:Raycast(origin, direction, raycastParams)
+	local rayParams = RaycastParams.new()
+	rayParams.FilterDescendantsInstances = {rig}
+	rayParams.FilterType = Enum.RaycastFilterType.Exclude
 
-	if rayResult and rayResult.Instance and rayResult.Instance:IsDescendantOf(character) then
-		return true
-	else
-		return false
-	end
+	local result = workspace:Raycast(myHRP.Position, direction, rayParams)
+
+	return result and result.Instance and result.Instance:IsDescendantOf(character)
 end
 
--- Find nearest visible player character
-local function findNearestPlayer()
-	local nearestCharacter = nil
-	local shortestDistance = math.huge
+--// TARGET SELECTION
+-- instead of locking onto a random player, the npc constantly reevaluates the world
+-- every loop. this makes its behavior feel reactive rather than scripted
+--
+-- the "nearest visible" rule gives it a simple priority system:
+-- closer targets are more important, but only if they are actually visible
+local function getNearestPlayer()
+	local closest = nil
+	local shortest = math.huge
+
+	local rigHRP = getHRP(rig)
+	if not rigHRP then return nil end
 
 	for _, player in pairs(Players:GetPlayers()) do
-		local character = player.Character
-		if character then
-			local hrp = getHRP(character)
-			local rigHRP = getHRP(rig)
+		local char = player.Character
+		local hrp = getHRP(char)
 
-			if hrp and rigHRP then
-				local distance = (rigHRP.Position - hrp.Position).Magnitude
-				if distance < shortestDistance and distance <= VISION_DISTANCE and checkForCharacter(character) then
-					nearestCharacter = character
-					shortestDistance = distance
-				end
+		if hrp then
+			local dist = (rigHRP.Position - hrp.Position).Magnitude
+
+			if dist < shortest and dist <= VISION_DISTANCE and canSee(char) then
+				closest = char
+				shortest = dist
 			end
 		end
 	end
 
-	return nearestCharacter
+	return closest
 end
 
--- Attempt to shake camera of player if close enough
-local function tryShakeCamera(player)
+--// PLAYER FEEDBACK
+-- the npc doesnt just act, it also signals its presence.
+-- this creates pressure on the player before the actual attack happens
+local function shakePlayer(player)
 	if not player then return end
 
-	local character = player.Character
-	if not character then return end
-
-	local hrp = getHRP(character)
+	local char = player.Character
+	local hrp = getHRP(char)
 	local rigHRP = getHRP(rig)
+
 	if hrp and rigHRP then
 		local dist = (hrp.Position - rigHRP.Position).Magnitude
 		if dist <= VISION_DISTANCE then
 			Remotes.CameraShake:FireClient(player, "Light")
-			debugPrint("Camera shake sent to", player.Name)
 		end
 	end
 end
 
--- Attack logic: move close, jumpscare, kill, morph
+--// ATTACK SYSTEM
+-- this function is designed to be interrupt-safe.
+-- debounce prevents overlapping attacks, which would otherwise break animations and logic
+--
+-- the flow is intentional:
+-- 1. check distance
+-- 2. if far, move instead of attacking
+-- 3. if close, commit fully to attack sequence
+--
+-- this separation keeps behavior predictable and avoids half-executed actions
 local function attack(character)
 	if debounce then return end
 	debounce = true
 
 	local rigHRP = getHRP(rig)
-	local victimHRP = getHRP(character)
-	if not rigHRP or not victimHRP then
+	local targetHRP = getHRP(character)
+
+	if not rigHRP or not targetHRP then
 		debounce = false
 		return
 	end
 
-	local distance = (rigHRP.Position - victimHRP.Position).Magnitude
+	local dist = (rigHRP.Position - targetHRP.Position).Magnitude
 
-	if distance > ATTACK_DISTANCE then
-		-- Move closer
-		rig.Humanoid:MoveTo(victimHRP.Position)
-		debugPrint("Moving to target:", character.Name)
+	-- movement is treated as a continuation of attack intent,
+	-- not a separate system. this is why it happens here
+	if dist > ATTACK_DISTANCE then
+		rig.Humanoid:MoveTo(targetHRP.Position)
 		debounce = false
-	else
-		-- Close enough: attack!
-		local victimHumanoid = character:FindFirstChildOfClass("Humanoid")
-		local rigHumanoid = rig:FindFirstChildOfClass("Humanoid")
+		return
+	end
 
-		if victimHumanoid and rigHumanoid then
-			local player = Players:GetPlayerFromCharacter(character)
-			if player then
-				Remotes.Jumpscare:FireClient(player)
-				debugPrint("Jumpscare triggered on player:", player.Name)
-			end
+	local victimHum = character:FindFirstChildOfClass("Humanoid")
+	local rigHum = rig:FindFirstChildOfClass("Humanoid")
 
-			-- Play attack animation
-			local animator = rigHumanoid:FindFirstChildOfClass("Animator") or Instance.new("Animator", rigHumanoid)
-			local attackAnim = Instance.new("Animation")
-			attackAnim.AnimationId = "rbxassetid://118559398898207" -- Your attack animation
-			local animTrack = animator:LoadAnimation(attackAnim)
-			animTrack.Priority = Enum.AnimationPriority.Action
-			animTrack:Play()
+	if victimHum and rigHum then
+		local player = Players:GetPlayerFromCharacter(character)
 
-			wait(0.5)
-
-			-- Kill victim
-			victimHumanoid.Health = 0
-
-			wait(0.3)
-
-			-- Morph into victim
-			local description = victimHumanoid:GetAppliedDescription()
-			rigHumanoid:ApplyDescription(description)
-			rigHumanoid.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
-
-			debugPrint("Morph complete into:", character.Name)
-
-			wait(DEBOUNCE_TIME) -- Cooldown after attack
+		if player then
+			Remotes.Jumpscare:FireClient(player)
 		end
-		debounce = false
+
+		local animator = rigHum:FindFirstChildOfClass("Animator") or Instance.new("Animator", rigHum)
+
+		local anim = Instance.new("Animation")
+		anim.AnimationId = "rbxassetid://118559398898207"
+
+		local track = animator:LoadAnimation(anim)
+		track.Priority = Enum.AnimationPriority.Action
+		track:Play()
+
+		task.wait(0.5)
+
+		victimHum.Health = 0
+
+		task.wait(0.3)
+
+		-- morphing copies the victim appearance after the attack finishes.
+		-- this happens after the kill so the visual change feels like a result,
+		-- not something happening mid-action
+		local desc = victimHum:GetAppliedDescription()
+		rigHum:ApplyDescription(desc)
+		rigHum.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
+
+		debugPrint("morphed into", character.Name)
+
+		task.wait(DEBOUNCE_TIME)
 	end
+
+	debounce = false
 end
 
--- Calculate path to destination with pathfinding
-local function calculatePath(destination)
-	local params = {
-		AgentHeight = 5.5,
-		AgentRadius = 4,
-		AgentCanJump = false
-	}
-
-	local path = PathfindingService:CreatePath(params)
-	local rigHRP = getHRP(rig)
-	if not rigHRP then
-		debugPrint("No rig HRP for pathfinding")
-		return nil
-	end
-
-	path:ComputeAsync(rigHRP.Position, destination)
-
-	if path.Status == Enum.PathStatus.Success then
-		debugPrint("Path computed successfully")
-		return path
-	else
-		debugPrint("Failed to compute path")
-		return nil
-	end
-end
-
--- Walk to destination by following waypoints
-local function walkToDestination(destination)
-	if isMoving then
-		debugPrint("Already moving, skipping walkToDestination")
-		return
-	end
-
+--// PATHFINDING MOVEMENT
+-- this is separate from attack movement because it handles "idle behavior"
+--
+-- the npc doesnt stand still when no players are found.
+-- instead, it keeps moving so that eventually it enters a player's space
+--
+-- while moving, it still checks for targets. this is important:
+-- movement never blocks awareness
+local function goTo(position)
+	if isMoving then return end
 	isMoving = true
 
-	local path = calculatePath(destination)
-	if not path then
-		-- Try simple MoveTo if pathfinding failed
-		local rigHRP = getHRP(rig)
-		if rigHRP then
-			rig.Humanoid:MoveTo(destination - rigHRP.CFrame.LookVector * 10)
-			debugPrint("Fallback MoveTo executed")
-		end
+	local rigHRP = getHRP(rig)
+	if not rigHRP then
+		isMoving = false
+		return
+	end
+
+	local path = PathfindingService:CreatePath({
+		AgentHeight = 5,
+		AgentRadius = 3,
+		AgentCanJump = false
+	})
+
+	path:ComputeAsync(rigHRP.Position, position)
+
+	if path.Status ~= Enum.PathStatus.Success then
+		rig.Humanoid:MoveTo(position)
 		isMoving = false
 		return
 	end
 
 	for _, waypoint in ipairs(path:GetWaypoints()) do
-		if waypoint.Action == Enum.PathWaypointAction.Jump then
-			rig.Humanoid.Jump = true
-		end
-
 		rig.Humanoid:MoveTo(waypoint.Position)
-		debugPrint("Moving to waypoint:", waypoint.Position)
 
 		local reached = false
 		local conn
-		conn = rig.Humanoid.MoveToFinished:Connect(function(reachedSuccessfully)
-			reached = reachedSuccessfully
+
+		conn = rig.Humanoid.MoveToFinished:Connect(function()
+			reached = true
 		end)
 
-		-- Wait until waypoint reached or timeout
 		local timer = 0
+
+		-- during movement, the npc constantly rechecks for targets.
+		-- this allows it to "change its mind" mid-path
 		while not reached and timer < 5 do
-			-- Check for new target to attack while moving
-			local nearestPlayer = findNearestPlayer()
-			if nearestPlayer then
-				attack(nearestPlayer)
-				local player = Players:GetPlayerFromCharacter(nearestPlayer)
-				tryShakeCamera(player)
+			local target = getNearestPlayer()
+
+			if target then
+				attack(target)
+
+				local player = Players:GetPlayerFromCharacter(target)
+				shakePlayer(player)
 			end
 
 			task.wait(0.1)
-			timer = timer + 0.1
+			timer += 0.1
 		end
+
 		conn:Disconnect()
 	end
 
 	isMoving = false
 end
 
--- === MAIN LOOP === --
-
+--// MAIN LOOP
+-- this acts as the decision layer.
+-- every cycle, the npc asks:
+-- "is there a valid target right now?"
+--
+-- if yes, it switches into aggressive behavior
+-- if not, it continues roaming to eventually create encounters
 while true do
 	task.wait(0.1)
 
-	-- Find nearest player in sight
-	local target = findNearestPlayer()
+	local target = getNearestPlayer()
 
 	if target then
-		currentTarget = target
 		attack(target)
-		local player = Players:GetPlayerFromCharacter(target)
-		tryShakeCamera(player)
-	else
-		-- No player visible, roam randomly
 
-		-- Get waypoints folder and children safely
-		local waypointsFolder = workspace:FindFirstChild("Waypoints")
-		if waypointsFolder then
-			local waypoints = waypointsFolder:GetChildren()
-			if #waypoints > 0 then
-				local randomWaypoint = waypoints[math.random(1, #waypoints)]
-				if randomWaypoint and randomWaypoint:IsA("BasePart") then
-					walkToDestination(randomWaypoint.Position)
-				else
-					debugPrint("Random waypoint invalid")
+		local player = Players:GetPlayerFromCharacter(target)
+		shakePlayer(player)
+	else
+		local folder = workspace:FindFirstChild("Waypoints")
+
+		if folder then
+			local points = folder:GetChildren()
+
+			if #points > 0 then
+				local randomPoint = points[math.random(1, #points)]
+
+				if randomPoint:IsA("BasePart") then
+					goTo(randomPoint.Position)
 				end
-			else
-				debugPrint("No waypoints found")
 			end
-		else
-			debugPrint("Waypoints folder missing in workspace")
 		end
 	end
 end
