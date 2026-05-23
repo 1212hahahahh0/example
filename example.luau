@@ -1,198 +1,251 @@
--- Fetching the core Roblox game services needed for player tracking and lifecycle
-local Players = game:GetService("Players") -- Service to manage player entries and exits
-local ReplicatedStorage = game:GetService("ReplicatedStorage") -- Shared storage for cross-script access
-local Debris = game:GetService("Debris") -- Service for scheduled, clean asset destruction
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TweenService = game:GetService("TweenService")
+local Debris = game:GetService("Debris")
+local Players = game:GetService("Players")
 
--- Global configuration settings for game balancing and timing adjustments
-local INTERMISSION_DURATION = 20 -- Time in seconds players wait before a round starts
-local ROUND_DURATION = 30 -- Total active time given for an event round to finish
-local MIN_PLAYERS_REQUIRED = 1 -- Minimum players needed to kick off the main cycle
+local events = ReplicatedStorage:WaitForChild("EventsFolder")
+local sanityRemote = events:WaitForChild("SANITY")
+local jumpjump = events:WaitForChild("JUMPJUMP")
 
--- Dynamic game states and dictionary references
-local gameActive = false -- Boolean tracker to monitor if a match is running
-local playerConnections = {} -- Dictionary to map user IDs to active connection events
+local REGEN_RATE = 1 -- sanity points restored per tick
+local REGEN_DELAY = 5 -- seconds after taking damage before regen resumes
 
--- Core function dedicated to handling user statistics setup
-local function setupPlayerStats(player)
-	-- Look for preexisting folder or create a new leaderstats folder
-	local leaderstats = player:FindFirstChild("leaderstats") or Instance.new("Folder")
-	leaderstats.Name = "leaderstats" -- Must be lowercase 'leaderstats' for leaderboard UI
-	leaderstats.Parent = player -- Parent folder directly to player object to load UI
+-- SanityManager handles all sanity state for a single player instance
+local SanityManager = {}
+SanityManager.__index = SanityManager
 
-	-- Instantiate the custom sanity tracker integer variable
-	local sanity = Instance.new("IntValue") -- Standard integer wrapper object
-	sanity.Name = "Sanity" -- Sets standard label used across event systems
-	sanity.Value = 100 -- Starting resource pool maximum capacity for players
-	sanity.Parent = leaderstats -- Embed statistic inside the leaderstats directory
-	
-	-- Connect to the CharacterAdded signal to track character models dynamically
-	playerConnections[player.UserId] = player.CharacterAdded:Connect(function(character)
-		local humanoid = character:WaitForChild("Humanoid") -- Safely index character health manager
-		local lastHealth = humanoid.Health -- Establish a benchmark memory variable for health updates
+-- creates a new SanityManager, builds the Stats folder and Sanity value under the player
+function SanityManager.new(player)
+	local self = setmetatable({}, SanityManager)
+	self.player = player
+	self.sanity = Instance.new("NumberValue")
+	self.sanity.Name = "Sanity"
+	self.sanity.Value = 100
+	self.lastDamageTime = 0
+	self.zeroTriggered = false
 
-		-- Monitor internal health changes to deduce sudden drops or damage spikes
-		local healthConn; healthConn = humanoid.HealthChanged:Connect(function(currentHealth)
-			-- Evaluate if current state indicates damage was sustained by user
-			if currentHealth < lastHealth then
-				local damage = lastHealth - currentHealth -- Isolate specific deduction difference value
-				sanity.Value = math.max(0, sanity.Value - math.floor(damage * 0.75)) -- Reduce sanity points proportionally
-			end -- Terminate damage evaluation conditional scope
-			lastHealth = currentHealth -- Adjust tracker benchmark to current health value
-		end) -- Terminate HealthChanged internal connection structural code block
+	local stats = Instance.new("Folder")
+	stats.Name = "Stats"
+	stats.Parent = player
+	self.sanity.Parent = stats
 
-		-- Capture character death state to reset relevant dynamic tracking systems
-		local diedConn; diedConn = humanoid.Died:Connect(function()
-			sanity.Value = 0 -- Instantly drain sanity value down to absolute zero base
-			healthConn:Disconnect() -- Flush the old health listener out of memory scope
-			diedConn:Disconnect() -- Clear this death connection instance to prevent leaking references
-		end) -- Terminate Died event connection structure block
-	end) -- Close dynamic character spawn connection wrapper scope
-end -- Complete setup player stats master function block
+	return self
+end
 
--- Garbage collection script routine meant to sweep data when players leave
-local function removePlayerStats(player)
-	-- Verify if player possesses registered active connection entries inside our log
-	if playerConnections[player.UserId] then
-		playerConnections[player.UserId]:Disconnect() -- Disconnect main listener mapping tracking
-		playerConnections[player.UserId] = nil -- Free table memory key index slot completely
-	end -- Terminate key presence safety conditional test structure
-end -- Conclude resource disposal function routine blocks
+-- sets the sanity value and syncs it to the client UI in one call
+function SanityManager:update(value)
+	self.sanity.Value = value
+	sanityRemote:FireClient(self.player, value)
+end
 
--- Storage system grouping together all individual match map activities
-local MapEvents = {
-	-- Dangerous environment logic handling lava interaction and creation
-	Lava = function()
-		local lava = Instance.new("Part") -- Create physical primitive workspace part template
-		lava.Size = Vector3.new(500, 1, 500) -- Broad layout scaling parameters to coat ground floors
-		lava.Position = Vector3.new(0, 0, 0) -- Target position centering directly over center stage arena
-		lava.BrickColor = BrickColor.new("Bright red") -- Assign clear visual alert coloring palette
-		lava.Material = Enum.Material.Neon -- Emissive surface configuration to visually emphasize threat
-		lava.Anchored = true -- Static locking setting applied to freeze position space matrix
-		lava.CanCollide = false -- Intentionally turn off collisions to pass damage through steps
-		lava.Parent = workspace -- Insert active instanced component into standard physical layer
-		
-		-- Hook event logic handler tracking intersecting collisions with hazard zone
-		local touchConn = lava.Touched:Connect(function(hit)
-			local hum = hit.Parent:FindFirstChildOfClass("Humanoid") -- Validate hit object source origin
-			if hum then hum:TakeDamage(10) end -- Deal flat health payload on intersecting collision detection
-		end) -- Terminate touch tracking execution process block
-		
-		task.wait(ROUND_DURATION) -- Keep environment threat fully functional through whole duration loop
-		touchConn:Disconnect() -- Break link connections to prevent residual background tick tracking
-		lava:Destroy() -- De-allocate hazard asset entirely from server layer structures
-	end, -- End lava sequence block callback structure
+-- resets sanity to 100 and clears the zero trigger flag
+function SanityManager:reset()
+	self.zeroTriggered = false
+	self:update(100)
+end
 
-	-- Natural hazard generator script producing periodic overhead projectiles
-	Meteors = function()
-		local active = true -- Active flag tracking loop execution safety parameters
-		task.spawn(function() -- Isolate internal hazard timer away from system thread blocking
-			while active do -- Repeat loop execution until termination signal flag is toggled
-				task.wait(math.random(1, 3)) -- Set semi-random target timing parameters between falling objects
-				local meteor = Instance.new("Part") -- Instantiate fresh physics projectile part asset
-				meteor.Shape = Enum.PartType.Ball -- Standard spherical geometrical structural mold representation
-				meteor.Size = Vector3.new(10, 10, 10) -- Large volumetric layout scaling framework for debris
-				meteor.Position = Vector3.new(math.random(-100, 100), 150, math.random(-100, 100)) -- Scatter start points overhead
-				meteor.BrickColor = BrickColor.new("Camo") -- Muddy surface color palette selection setup
-				meteor.Velocity = Vector3.new(0, -100, 0) -- Apply strong initial downward momentum trajectory vector force
-				meteor.Parent = workspace -- Commit current instance structural link down to physics engine
-				
-				-- Handle spatial impacts when debris contacts structure ground segments
-				meteor.Touched:Connect(function()
-					local exp = Instance.new("Explosion") -- Generate dynamic explosive instance utility module
-					exp.Position = meteor.Position -- Center point mapping aligned exactly onto projectile origin location
-					exp.BlastRadius = 15 -- Explocive range setting bounding parameters
-					exp.Parent = workspace -- Explode in global environment layout context immediately
-					meteor:Destroy() -- Clean tracking projectile entity records off the grid
-				end) -- Close internal projectile collision routine scope
-				Debris:AddItem(meteor, 5) -- Fail-safe lifespan limitation applied to prevent infinite drifting items
-			end -- Close active flag controlled conditional generation loop structure
-		end) -- End system thread isolating sub-task initialization block
-		task.wait(ROUND_DURATION) -- Pause master level tracking script for duration scope limits
-		active = false -- Flip switch status parameter to cease object production calls
-	end, -- End meteor event dictionary structure setup
+-- converts raw damage into a 75% sanity loss and stamps the damage time for regen delay
+function SanityManager:takeDamage(amount)
+	local loss = amount * 0.75
+	self:update(math.max(0, self.sanity.Value - loss))
+	self.lastDamageTime = time()
+end
 
-	-- Dynamic moving wall obstacle utilizing basic interpolation calculations
-	Tsunami = function()
-		local wave = Instance.new("Part") -- Instantiate moving wall geometrical threat block profile
-		wave.Size = Vector3.new(500, 50, 10) -- Broad dimensional profile scaling framework for threat walls
-		wave.Position = Vector3.new(0, 25, -250) -- Starting positioning coordinate assignment framework setup
-		wave.BrickColor = BrickColor.new("Bright blue") -- Assign blue thematic tint styling layout profile
-		wave.Transparency = 0.5 -- Visual opacity reduction variable assignment framework parameters
-		wave.Anchored = true -- Fix component tracking against active physics engine weight reactions
-		wave.CanCollide = false -- Restrict rigid framework pushing behaviors during translation updates
-		wave.Parent = workspace -- Mount structural instance entry record into current level workspace
-		
-		-- Establish active hazard interception parameters mapping physical contacts
-		local touchConn = wave.Touched:Connect(function(hit)
-			local hum = hit.Parent:FindFirstChildOfClass("Humanoid") -- Query hit element character configuration details
-			if hum then hum:TakeDamage(50) end -- Execute massive structural damage penalty checks against health
-		end) -- Close collision routine linkage structure map definitions
-		
-		-- Linear frame tracking simulation loop moving threat wall piece safely
-		for i = 0, 1, 0.01 do -- Progress numeric fraction scale step benchmarks over loop frames
-			wave.Position = wave.Position:Lerp(Vector3.new(0, 25, 250), 0.01) -- Move location using basic lerp matrix calculations
-			task.wait() -- Yield processing frames explicitly to smooth graphic display refresh loops
-		end -- Terminate translation framing script update loop block structure
-		
-		touchConn:Disconnect() -- Unlink active damage tracking connections safely before deleting assets
-		wave:Destroy() -- Purge moving threat boundary part away from persistent level layers
-	end, -- End tsunami event dictionary definition block structure
+-- wires up HealthChanged and Died listeners each time the character spawns
+function SanityManager:setupCharacter(character)
+	local humanoid = character:WaitForChild("Humanoid")
+	local lastHealth = humanoid.Health
 
-	-- Inventory distribution event rewarding active survivors with item loadouts
-	Swords = function()
-for _, player in Players:GetPlayers() do -- Cycle through active players currently connected to server instance
-local char = player.Character -- Collect character model property links safely from user objects
-if char and char:FindFirstChild("Humanoid") and char.Humanoid.Health > 0 then -- Verify actor viability
-local sword = ReplicatedStorage:FindFirstChild("ClassicSword") -- Scan local storage assets for weapons blueprints
-if sword then -- Check item template validation status parameters before running code clones
-sword:Clone().Parent = player.Backpack -- Insert cloned item instances inside user inventories safely
-end -- End internal configuration check verifying inventory asset status options
-end -- End user state validation checks confirming active baseline health levels
-end -- Close automated player grouping looping sequences structures block
-task.wait(ROUND_DURATION) -- Keep loadout distribution parameters functional through core match durations
-end -- Close individual loadout event action logic handling boundaries
-} -- Complete full map activities mapping configuration definitions
--- Central state machine function manager running continuous round sequences
-local function startLoop()
-while true do -- Maintain infinite operational looping pattern workflow system cycles
-local currentPlayers = Players:GetPlayers() -- Pull updated player counts currently initialized
-if #currentPlayers >= MIN_PLAYERS_REQUIRED then -- Evaluate if participant thresholds meet requirements
-gameActive = true -- Elevate structural state status flag variables to operational metrics
-print("Intermission starting...") -- Send standard system updates over console tracking networks
-task.wait(INTERMISSION_DURATION) -- Halt game flow for standard intermission countdown timings
--- Array index registry specifying active available option pathways
-local eventKeys = {"Lava", "Meteors", "Tsunami", "Swords"} -- Mapping array of valid event identifiers
-local chosenEvent = eventKeys[math.random(1, #eventKeys)] -- Extract random target keys from index pools
-print("Event chosen: " .. chosenEvent) -- Log active operations data directly inside diagnostics logs
--- Shield master game loop routine tracking using protective wrapper layers
-local success, err = pcall(function()
-MapEventschosenEvent -- Launch index matched event routine directly from configuration definitions
-end) -- Close protected execution parameter structural definition code block
-if not success then -- Inspect outcome metrics to isolate structural execution runtime faults
-warn("Error running event " .. chosenEvent .. ": " .. tostring(err)) -- Output tracked exceptions safely
-end -- Terminate code execution error monitoring status verification structures
--- Process points distribution profiles checking ongoing state details
-for _, player in Players:GetPlayers() do -- Iterate active session player registries sequentially
-local stats = player:FindFirstChild("leaderstats") -- Query active user statistics storage folders
-local sanity = stats and stats:FindFirstChild("Sanity") -- Pull point profile records tracking sanity metrics
-if sanity and sanity.Value > 0 then -- Confirm survivor profile viability via resource values
-print(player.Name .. " survived the round!") -- Print celebration success entries across standard consoles
-end -- Terminate survivor health metric verification code block segments
-end -- Close data distribution player parsing loop sequence bounds
-print("Round finished. Restarting loop...") -- Append sequence termination markers inside tracking consoles
-else -- Fallback route handling low server activity state scenarios
-gameActive = false -- Lower structural match activity indicators down to dormant states
-print("Waiting for more players...") -- Stream connectivity requirement notices down tracking dashboards
-task.wait(5) -- Set basic cool-down loops before evaluating connection populations again
-end -- End participant verification structural evaluation statement blocks
-end -- Terminate master framework infinite sequencing runtime execution paths
-end -- End core lifecycle game loop manager system definitions
--- Initialize stats setup layout configurations processing retroactively existing profiles
-for _, player in Players:GetPlayers() do -- Process player models matching active historical load connections
-setupPlayerStats(player) -- Execute baseline profile layout setups targeting existing session contexts
-end -- Terminate active historical registry setup parsing workflows completely
--- Attach primary global event listening systems mapping session updates safely
-Players.PlayerAdded:Connect(setupPlayerStats) -- Direct system pipeline routes to handle incoming connection setups
-Players.PlayerRemoving:Connect(removePlayerStats) -- Direct system connections ensuring data cleanup on departures
--- Execute master framework loop routines across independent background threads safely
-task.spawn(startLoop) -- Initialize main processing structures tracking session round pipelines safely
+	self:reset()
+
+	humanoid.HealthChanged:Connect(function(newHealth)
+		if newHealth < lastHealth then
+			self:takeDamage(lastHealth - newHealth)
+		end
+		lastHealth = newHealth
+	end)
+
+	humanoid.Died:Connect(function()
+		self:reset()
+	end)
+end
+
+-- runs a per-second loop that handles regen and zero-sanity punishment
+function SanityManager:startRegenLoop()
+	task.spawn(function()
+		while self.player.Parent do
+			task.wait(1)
+
+			if self.sanity.Value < 100 and (time() - self.lastDamageTime) >= REGEN_DELAY then
+				self:update(math.min(100, self.sanity.Value + REGEN_RATE))
+			end
+
+			-- fires a jumpscare to the client then kicks after a short delay
+			if self.sanity.Value <= 0 and not self.zeroTriggered then
+				self.zeroTriggered = true
+				jumpjump:FireClient(self.player)
+				task.wait(7)
+				if self.player.Parent then
+					self.player:Kick("👁👁...")
+				end
+			end
+		end
+	end)
+end
+
+Players.PlayerAdded:Connect(function(player)
+	local manager = SanityManager.new(player)
+
+	if player.Character then
+		manager:setupCharacter(player.Character)
+	end
+
+	-- re-runs character setup on every respawn
+	player.CharacterAdded:Connect(function(character)
+		manager:setupCharacter(character)
+	end)
+
+	manager:startRegenLoop()
+end)
+
+-- LAVA EVENT
+events.Lava.Event:Connect(function()
+	events.Dialogue:FireAllClients("GET UP THE TOWER BEFORE THE LAVA GETS YOU!")
+
+	local model = events:WaitForChild("LavaEscape"):Clone()
+	local lava = model:WaitForChild("Baseplate")
+	model.Name = "LavaEscape"
+	model.Parent = workspace
+	lava.Anchored = true
+
+	-- tweens the baseplate's Y size upward to simulate lava rising
+	local startSize = lava.Size
+	local tween = TweenService:Create(lava, TweenInfo.new(299, Enum.EasingStyle.Cubic, Enum.EasingDirection.Out), {
+		Size = Vector3.new(startSize.X, 100, startSize.Z)
+	})
+	tween:Play()
+
+	task.delay(30, function()
+		if model and model.Parent then
+			model:Destroy()
+		end
+	end)
+end)
+
+-- SWORD EVENT
+events.Sword.Event:Connect(function()
+	events.Dialogue:FireAllClients("one of us is a traitor and has a sword with him!")
+
+	local plrs = Players:GetPlayers()
+	if #plrs >= 1 then
+		-- picks a random player and drops the sword into their backpack
+		local chosen = plrs[math.random(1, #plrs)]
+		local clone = game.ServerStorage.Items.Sword:Clone()
+		clone.Parent = chosen.Backpack
+
+		task.delay(30, function()
+			if clone and clone.Parent then
+				clone:Destroy()
+			end
+		end)
+	end
+end)
+
+-- METEOR SHOWER EVENT
+events.MeteorShower.Event:Connect(function()
+	events.Dialogue:FireAllClients("OH NO! METEORS")
+
+	local base = workspace:WaitForChild("Baseplate")
+	local model = events:WaitForChild("METEOR")
+
+	local function spawnMeteor()
+		local clone = model:Clone()
+		clone.Parent = workspace
+		clone.Anchored = false
+
+		-- scatters spawn points randomly across the baseplate surface
+		local size = base.Size
+		local pos = base.Position
+		clone.Position = Vector3.new(
+			pos.X + math.random(-size.X / 2, size.X / 2),
+			pos.Y + 50,
+			pos.Z + math.random(-size.Z / 2, size.Z / 2)
+		)
+
+		if clone:IsA("BasePart") then
+			clone.AssemblyLinearVelocity = Vector3.new(0, -50, 0)
+		end
+		-- debounce prevents the explosion from firing more than once per meteor
+		local exploded = false
+		clone.Touched:Connect(function(hit)
+			if exploded or not hit:IsDescendantOf(workspace) then return end
+			exploded = true
+			local explosion = Instance.new("Explosion")
+			explosion.Position = clone.Position
+			explosion.BlastRadius = 10
+			explosion.BlastPressure = 500000
+			explosion.Parent = workspace
+			clone:Destroy()
+		end)
+		Debris:AddItem(clone, 10)
+	end
+	-- staggers one meteor per second over 30 seconds
+	for i = 1, 30 do
+		task.delay(i, spawnMeteor)
+	end
+end)
+-- TSUNAMI EVENT
+events.Tsunami.Event:Connect(function()
+	events.Dialogue:FireAllClients("TSUNAMI INCOMING! GET IN THE BUNKER!")
+	-- clones the folder so the original stays intact for future rounds
+	local folder = events:WaitForChild("TsunamiFolder"):Clone()
+	local wave = folder:FindFirstChild("Wave")
+	wave.Anchored = true
+	folder.Parent = workspace
+	-- slides the wave across the map using a tween
+	TweenService:Create(wave, TweenInfo.new(100, Enum.EasingStyle.Cubic, Enum.EasingDirection.Out), {
+		Position = Vector3.new(-350, 0, 0)
+	}):Play()
+	task.delay(30, function()
+		folder:Destroy()
+		-- teleports all players back to the designated spawn point after the wave clears
+		for _, plr in Players:GetPlayers() do
+			local char = plr.Character
+			local hrp = char and char:FindFirstChild("HumanoidRootPart")
+			if hrp then
+				task.wait(0.01)
+				hrp.CFrame = workspace.BaseplateTp.CFrame
+			end
+		end
+	end)
+end)
+-- LANDMINE EVENT
+events.Landmine.Event:Connect(function()
+	events.Dialogue:FireAllClients("CAREFUL NOT TO EXPLODE, WATCH YOUR STEPS")
+	-- clones the bomb so the original stays in events for future rounds
+	local bomb = events.Bomb:Clone()
+	bomb.Parent = workspace
+	task.delay(30, function()
+		if bomb and bomb.Parent then
+			bomb:Destroy()
+		end
+	end)
+end)
+-- LOW GRAVITY EVENT
+events.LOWGRAV.Event:Connect(function()
+	events.Dialogue:FireAllClients("GRAVITY HAS BEEN CHANGED, BE CAREFUL")
+	-- stores the original gravity so it can be restored exactly after the event
+	local original = workspace.Gravity
+	workspace.Gravity = 50
+	task.wait(30)
+	workspace.Gravity = original
+end)
+-- KILLER EVENT
+events.KILLER.Event:Connect(function()
+	events.Dialogue:FireAllClients("A KILLER IS ON THE LOOSE! DON'T DIE")
+	-- clones the NPC so the original stays in events for future rounds
+	local killer = events.Noob:Clone()
+	killer.Parent = workspace
+	task.wait(30)
+	killer:Destroy()
+end)
