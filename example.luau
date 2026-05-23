@@ -1,646 +1,284 @@
---[[
-	advanced npc ai. 
-	this script started as a super simple chase npc,
-	but i kept adding stuff after testing 
+---[Please note that this is an old project, so dont mind the intermiadite style sscripting lolz.]
 
-	features:
-	- patrols randomly
-	- chases players if seen
-	- remembers last position for a few seconds
-	- uses pathfinding so it doesnt slam into walls forever
-	- basic stuck detection because roblox humanoids are... special
-	- attack system
-	- footsteps + ambient sounds
-	- optional debug mode
 
-	if you use this for multiple npcs at once,
-	my lawyer said that its not my fault you didnt use moduler(spelt that wrong </3) script.
-]]
+local ReplicatedStorage = game:GetService("ReplicatedStorage")--refers to the replicatedstorage
+local TweenService = game:GetService("TweenService")-- refers to the tween service
+local Debris = game:GetService("Debris")-- refers to the debris service
+local Players = game:GetService("Players")-- refers to the players
 
-local PathfindingService = game:GetService("PathfindingService") --- just a service on roblox. 
-local Players = game:GetService("Players")--- players
-local RunService = game:GetService("RunService") -- runservice
-local Debris = game:GetService("Debris")---debris, which deletes...
+local events = ReplicatedStorage:WaitForChild("EventsFolder")-- waits for the folder to load in replicated storage. and makign a var called events
 
-local npc = script.Parent-- im guessing that this is where the npc is?
-local humanoid = npc:WaitForChild("Humanoid")-- humanoid
-local root = npc:WaitForChild("HumanoidRootPart")
-local head = npc:WaitForChild("Head")
--- keeping settings in one table makes balancing easier later.
--- instead of hunting random numbers across 500 lines of code.
--- // settings
+-- LAVA EVENT
+events.Lava.Event:Connect(function()-- if the lava event is fired then 
+	events.Dialogue:FireAllClients("GET UP THE TOWER BEFORE THE LAVA GETS YOU!") -- fires the dialogue event to all clients
+	local model = events:WaitForChild("LavaEscape"):Clone() -- clones the lava model
+	local lava = model:WaitForChild("Baseplate")-- waits for the baseplate
+	model.Name = "LavaEscape" -- renames it
+	model.Parent = workspace-- places it in the workspace
 
-local SETTINGS = {
-	debug = true, --- determains should we debug or not.
+	lava.Anchored = true -- anchors the model
 
-	walkSpeed = 10,-- kinda self explanatory isnt it?
-	chaseSpeed = 18,-- this too
+	local tweenInfo = TweenInfo.new( --- tween info
+		299, -- duration
+		Enum.EasingStyle.Cubic, -- easing style
+		Enum.EasingDirection.Out-- easing direction
+	)
 
-	detectionRadius = 80,--- where the scawwy monster see that victim. then he will go num num num on their legs
-	loseDistance = 120, --- if somehow the player managed to go 120+ studs away the monster is dumb and will look for other persons
+	local startPos = lava.Size -- start size
+	local goal = {Size = Vector3.new(startPos.X, 100, startPos.Z)} -- slowly making the model rise to give off the impression that lava is rising
 
-	attackDistance = 4,---down here is pretty understandable and im tired of making comments. 
-	attackDamage = 25,
+	local tween = TweenService:Create(lava, tweenInfo, goal) -- create the tween
+	tween:Play()-- play the tween
 
-	memoryTime = 8,
-
-	stuckCheckDelay = 1.5,
-	stuckDistance = 2,
-
-	footstepDelay = 0.35,
-
-	pathRetryLimit = 2,
-}
--- currentState is mostly for organization and debugging.
--- the npc doesnt REALLY need states to function,
--- but it makes behavior easier to track while testing.
--- and also it looks professional.
-
--- // state vars
-
-local currentState = "idle"
--- target stores the actual player object.
--- not just the character.
--- this is useful because characters respawn while players stay consistant.
-local target = nil
-
-local lastSeenPos = nil
-local lastSeenTime = 0
-
-local lastPosition = root.Position
-local lastFootstep = 0
-
-local isAttacking = false
-local isPathfinding = false
-
-local patrolPoints = {}
-
--- i dont like using globals for retry stuff
--- because debugging becomes annoying later
-local retryCount = 0
-
--- // patrol points setup
-
--- if a folder called PatrolPoints exists,
--- the npc will randomly walk between them
-local patrolFolder = workspace:FindFirstChild("PatrolPoints")
-
-if patrolFolder then
-	for _, point in ipairs(patrolFolder:GetChildren()) do
-		if point:IsA("BasePart") then
-			table.insert(patrolPoints, point)
+	-- cleanup after 30 seconds
+	task.delay(30, function()
+		if model then
+			model:Destroy()
 		end
+	end)
+end)
+
+-- SWORD EVENT
+events.Sword.Event:Connect(function() -- if the sword event is fired then 
+	-- fires the dialogue event to all clients
+	events.Dialogue:FireAllClients("one of us is a traitor and has a sword with him!")
+	-- chooses a random player
+	local model = game.ServerStorage.Items.Sword
+	
+	local plrs = Players:GetPlayers()-- gets all the players in Players
+	if #plrs >= 1 then -- if the number is bigger than 1
+		local chosen = plrs[math.random(1, #plrs)]-- chooses a random player
+		local clone = model:Clone()-- clones the sword
+		clone.Parent = chosen.Backpack-- places it in the backpack of the chosen player
+			-- cleanup
+		task.delay(30, function()
+			if clone then
+				clone:Destroy()
+			end
+		end)
 	end
-end
+end)
 
--- // debug printing
+-- METEOR SHOWER EVENT
+events.MeteorShower.Event:Connect(function() -- if the meteor shower event is fired then 
+	-- fires the dialogue event to all clients
+	events.Dialogue:FireAllClients("OH NO! METEORS")
+	local base = workspace:WaitForChild("Baseplate")-- gets the baseplate
+	local model = events:WaitForChild("METEOR") -- gets the meteor model
 
-local function debugPrint(...)
-	if SETTINGS.debug then
-		print("[NPC]", ...)
+	local duration = 30
+	local interval = 1
+
+	local function spawnMeteor() -- spawns a meteor
+		local clone = model:Clone()
+		clone.Parent = workspace
+		clone.Anchored = false
+
+		local size = base.Size-- gets the size of the baseplate
+		local pos = base.Position -- gets the position of the baseplate
+		local randomX = pos.X + math.random(-size.X/2, size.X/2) -- randomizes the x position
+		local randomZ = pos.Z + math.random(-size.Z/2, size.Z/2)-- randomizes the z position
+		local spawnY = pos.Y + 50-- spawns it 50 studs above the baseplate
+
+		clone.Position = Vector3.new(randomX, spawnY, randomZ)-- spawns the meteor
+
+		if clone:IsA("BasePart") then -- if the meteor is a part
+			clone.AssemblyLinearVelocity = Vector3.new(0, -50, 0)
+		end
+		-- exposion
+		clone.Touched:Connect(function(hit)
+			if hit:IsDescendantOf(workspace) then
+				local explosion = Instance.new("Explosion")
+				explosion.Position = clone.Position
+				explosion.BlastRadius = 10
+				explosion.BlastPressure = 500000
+				explosion.Parent = workspace
+
+				clone:Destroy()
+			end
+		end)
+		
+		Debris:AddItem(clone, 10)
 	end
-end
 
--- // changing states
-
--- mostly for debugging honestly
--- makes it easier to see what the npc thinks its doing
-local function setState(newState)
-	if currentState ~= newState then
-		debugPrint(currentState .. " -> " .. newState)
-		currentState = newState
+	for i = 1, duration do
+		task.delay(i * interval, spawnMeteor)
 	end
-end
+end)
+events.Tsunami.Event:Connect(function() -- if the tsunami event is fired then
+	events.Dialogue:FireAllClients("TSUNAMI INCOMING! GET IN THE BUNKER!")
 
--- // alive check
+	local folder = events:WaitForChild("TsunamiFolder") -- gets the tsunami folder
+	local wave = folder:FindFirstChild("Wave") -- gets the wave part
+	wave.Anchored = true -- anchors the wave
+	folder.Parent = workspace -- places the tsunami into workspace
 
--- i separated this into its own function because i kept reusing the same checks everywhere
-local function isPlayerAlive(player)
-	if not player.Character then
-		return false
+	local TimeUntilRemove = 30 -- how long the tsunami lasts
+
+	local goal = { Position = Vector3.new(-350, 0, 0)} -- target position for the wave
+
+	local tif = TweenInfo.new(
+		100, -- duration
+		Enum.EasingStyle.Cubic, -- easing style
+		Enum.EasingDirection.Out, -- easing direction
+		0, -- repeat count
+		false, -- reverses
+		0 -- delay time
+	)
+
+	TweenService:Create(wave, tif, goal):Play() -- creates and plays the tween
+
+	local plrs = game.Players -- gets the players service
+
+	task.delay(30, function() -- waits before cleanup
+		folder:Destroy()	-- destroys the tsunami
+
+		for _, plr in pairs(plrs:GetChildren()) do -- loops through all players
+			local char = plr.Character -- gets the character
+			local hrp = char:FindFirstChild("HumanoidRootPart") -- gets humanoidrootpart
+
+			if hrp then -- if hrp exists
+				wait(0.01)
+				hrp.CFrame = workspace.BaseplateTp.CFrame -- teleports player back
+			end
+		end
+	end)
+end)
+
+events.Landmine.Event:Connect(function() -- if the landmine event is fired then
+	events.Dialogue:FireAllClients("CAREFUL NOT TO EXPLODE, WATCH YOUR STEPS")
+
+	local bomb = events.Bomb -- gets the bomb object
+	bomb.Parent = workspace -- places it into workspace
+
+	task.delay(30, function() -- cleanup after 30 seconds
+		bomb:Destroy()
+	end)
+end)
+
+events.LOWGRAV.Event:Connect(function() -- if the low gravity event is fired then
+	events.Dialogue:FireAllClients("GRAVITY HAS BEEN CHANGED, BE CAREFUL")
+
+	local grav = workspace.Gravity -- stores original gravity
+
+	workspace.Gravity = 50 -- lowers gravity
+
+	wait(30) -- waits 30 seconds
+
+	workspace.Gravity = 196.2 -- restores normal gravity
+end)
+
+events.KILLER.Event:Connect(function() -- if the killer event is fired then
+	local killer = events.Noob:Clone() -- clones the killer npc
+
+	events.Dialogue:FireAllClients("A KILLER IS ON THE LOOSE! DON'T DIE")
+
+	killer.Parent = workspace -- places the killer in workspace
+
+	task.wait(30) -- waits 30 seconds
+
+	killer.Parent = events -- stores the killer back
+end)
+
+local Players = game:GetService("Players") -- refers to the players service
+local ReplicatedStorage = game:GetService("ReplicatedStorage") -- refers to replicated storage
+
+local sanityremote = ReplicatedStorage.EventsFolder:WaitForChild("SANITY") -- remote event for sanity updates
+local jumpjump = ReplicatedStorage.EventsFolder:WaitForChild("JUMPJUMP") -- remote event for sanity death effect
+
+local REGEN_RATE = 0 -- sanity regeneration amount
+local REGEN_DELAY = 0 -- delay before sanity regeneration
+
+Players.PlayerAdded:Connect(function(plr) -- when a player joins
+
+	-- creates stats folder
+	local stats = Instance.new("Folder")
+	stats.Name = "Stats"
+	stats.Parent = plr
+
+	-- creates sanity value
+	local sanity = Instance.new("NumberValue")
+	sanity.Name = "Sanity"
+	sanity.Value = 100
+	sanity.Parent = stats
+
+	local lastDamageTime = 0 -- tracks when player last took damage
+	local zeroTriggered = false -- prevents zero sanity from triggering multiple times
+
+	local function setupCharacter(chr) -- setup function for character
+		local hum = chr:WaitForChild("Humanoid") -- gets humanoid
+
+		local lastHealth = hum.Health -- stores previous health
+
+		-- resets sanity on spawn
+		sanity.Value = 100
+		sanityremote:FireClient(plr, sanity.Value)
+
+		zeroTriggered = false
+
+		-- listens for health changes
+		hum.HealthChanged:Connect(function(newHealth)
+
+			if newHealth < lastHealth then -- if player took damage
+
+				local dmg = lastHealth - newHealth -- calculates damage taken
+
+				local loss = dmg * 0.75 -- converts damage into sanity loss
+
+				sanity.Value = math.max(0, sanity.Value - loss) -- decreases sanity
+
+				lastDamageTime = time() -- updates last damage timestamp
+
+				sanityremote:FireClient(plr, sanity.Value) -- updates client ui
+			end
+
+			lastHealth = newHealth -- updates stored health
+		end)
+
+		hum.Died:Connect(function() -- when player dies
+
+			sanity.Value = 100 -- resets sanity
+
+			sanityremote:FireClient(plr, sanity.Value)
+
+			zeroTriggered = false -- resets trigger
+		end)
 	end
 
-	local char = player.Character
-	local hum = char:FindFirstChild("Humanoid")
-	local hrp = char:FindFirstChild("HumanoidRootPart")
-
-	if hum and hrp and hum.Health > 0 then
-		return true
+	-- setup first spawn
+	if plr.Character then
+		setupCharacter(plr.Character)
 	end
 
-	return false
-end
+	plr.CharacterAdded:Connect(setupCharacter) -- setup future respawns
 
--- // closest player
+	-- sanity regeneration loop
+	task.spawn(function()
 
--- this is simple magnitude checking.
--- technically not the most optimized solution ever,
--- but unless you have like 50 npcs at once its fine.
-local function getClosestPlayer()
-	local closestPlayer = nil
-	local closestDistance = SETTINGS.detectionRadius
+		while plr.Parent do -- while player exists
 
-	for _, player in ipairs(Players:GetPlayers()) do
-		if isPlayerAlive(player) then
-			local char = player.Character
-			local hrp = char:FindFirstChild("HumanoidRootPart")
+			task.wait(1)
 
-			if hrp then
-				local dist = (root.Position - hrp.Position).Magnitude
+			if sanity.Value < 100 and (time() - lastDamageTime) >= REGEN_DELAY then
 
-				if dist < closestDistance then
-					closestDistance = dist
-					closestPlayer = player
+				sanity.Value = math.min(100, sanity.Value + REGEN_RATE) -- regenerates sanity
+
+				sanityremote:FireClient(plr, sanity.Value) -- updates client
+			end
+
+			-- if sanity reaches zero
+			if sanity.Value <= 0 and not zeroTriggered then
+
+				zeroTriggered = true -- prevents retriggering
+
+				jumpjump:FireClient(plr) -- fires hallucination/jumpscare
+
+				task.wait(7)
+
+				if plr.Parent then -- if player still exists
+					plr:Kick("👁👁...") -- kicks the player
 				end
 			end
 		end
-	end
-
-	return closestPlayer
-end
-
--- // line of sight
-
--- without this the npc would detect players through walls which looked SOOO dumb
-local function hasLineOfSight(character)
-	local hrp = character:FindFirstChild("HumanoidRootPart")
-
-	if not hrp then
-		return false
-	end
-
-	local origin = head.Position
-	local direction = hrp.Position - origin
-
-	local params = RaycastParams.new()
-
-	-- ignoring the npc itself otherwise
-	-- the ray instantly hits its own body, we dont want that...... or do we?
-	params.FilterDescendantsInstances = {npc}
-	params.FilterType = Enum.RaycastFilterType.Blacklist
-
-	local result = workspace:Raycast(origin, direction, params)
-
-	if result then
-		return result.Instance:IsDescendantOf(character)
-	end
-
-	return true
-end
-
--- // path creation
-
--- originally i used humanoid:MoveTo directly
--- but the npc got stuck on literally everything
--- now i have chosen another way
-local function createPath(destination)
-	local path = PathfindingService:CreatePath({
-		AgentRadius = 2,
-		AgentHeight = 5,
-		AgentCanJump = true,
-		AgentJumpHeight = 10, ---yeah btw change this to the hight of the rig. trust.
-		AgentMaxSlope = 45
-	})
-
-	local success, err = pcall(function()
-		path:ComputeAsync(root.Position, destination)
 	end)
-
-	if success and path.Status == Enum.PathStatus.Success then
-		return path
-	else
-		debugPrint("path failed", err)
-		return nil
-	end
-end
-
--- // debug waypoint visuals
-
-local function showWaypoint(pos)
-	if not SETTINGS.debug then
-		return
-	end
-
-	local marker = Instance.new("Part")---makes a new waypoints and puts it right at pos. this way if the pathfinding is dumb again we will know what he did
-
-	marker.Shape = Enum.PartType.Ball
-	marker.Material = Enum.Material.Neon
-	marker.Size = Vector3.new(0.4,0.4,0.4)
-
-	marker.Anchored = true
-	marker.CanCollide = false
-
-	marker.Position = pos
-	marker.Parent = workspace
-
-	Debris:AddItem(marker, 1.5)
-end
-
--- // movement
-
--- this function is honestly the core of the whole npc.
--- everything eventually funnels into here.
-
-local function moveTo(destination)
-
-	-- prevents overlapping path calls
-	if isPathfinding then
-		return false
-	end
-
-	isPathfinding = true
-
-	local path = createPath(destination)
-
-	if not path then
-		isPathfinding = false
-		return false
-	end
-
-	local waypoints = path:GetWaypoints()
-
-	-- path.Blocked doesnt always save you,
-	-- but it helps sometimes when doors close etc
-	path.Blocked:Connect(function()
-		debugPrint("path got blocked")
-
-		if retryCount < SETTINGS.pathRetryLimit then
-			retryCount += 1
-			-- as you can see comments are getting less and less. this is because im really tired of always typing comments
-			debugPrint("retrying path")
-
-			isPathfinding = false
-			moveTo(destination)
-		end
-	end)
-
-	for _, waypoint in ipairs(waypoints) do
-
-		showWaypoint(waypoint.Position)
-
-		-- roblox pathfinding tells us
-		-- when a jump is needed
-		if waypoint.Action == Enum.PathWaypointAction.Jump then
-			humanoid.Jump = true
-		end
-
-		humanoid:MoveTo(waypoint.Position)
-
-		local reached = humanoid.MoveToFinished:Wait()
-
-		if not reached then
-			debugPrint("failed to reach waypoint")
-
-			isPathfinding = false
-			return false
-		end
-	end
-
-	retryCount = 0
-	isPathfinding = false
-
-	return true
-end
-
--- // stuck detection
-
--- humanoids randomly freezing on corners
--- is basically a roblox rite of passage
-local function checkIfStuck()
-
-	local movedDistance = (root.Position - lastPosition).Magnitude
-
-	if movedDistance <= SETTINGS.stuckDistance then
-
-		debugPrint("npc might be stuck")
-
-		-- jumping actually fixes it surprisingly often
-		humanoid.Jump = true
-
-		return true
-	end
-
-	lastPosition = root.Position
-
-	return false
-end
-
--- // footsteps
-
--- this only plays while actually moving.
--- without a delay it sounded like a machine gun. 
-local function playFootstep()
-
-	if tick() - lastFootstep < SETTINGS.footstepDelay then
-		return
-	end
-
-	lastFootstep = tick()
-
-	local sound = Instance.new("Sound")
-
-	sound.SoundId = "rbxassetid://123123123"----this doesnt work btw. i mean its obv but alot do not know
-	sound.Volume = 0.3
-	sound.Parent = root
-
-	sound:Play()
-
-	Debris:AddItem(sound, 2)
-end
-
--- // attack logic
-
--- not super advanced combat,
--- but enough for a horror/survival npc
-local function attackPlayer(player)
-
-	if isAttacking then
-		return
-	end
-
-	if not isPlayerAlive(player) then
-		return
-	end
-
-	local char = player.Character
-	local hum = char:FindFirstChild("Humanoid")
-	local hrp = char:FindFirstChild("HumanoidRootPart")
-
-	if not hum or not hrp then
-		return
-	end
-
-	local dist = (root.Position - hrp.Position).Magnitude
-
-	if dist > SETTINGS.attackDistance then
-		return
-	end
-
-	isAttacking = true
-
-	debugPrint("attacking", player.Name)
-
-	-- using old animation loading here mainly
-	-- because it still works fine for this setup
-	local anim = Instance.new("Animation")
-	anim.AnimationId = "rbxassetid://10469630950"
-
-	local track = humanoid:LoadAnimation(anim)
-
-	track:Play()
-
-	-- synced roughly with the hit frame
-	task.wait(0.4)
-
-	if isPlayerAlive(player) then
-		hum:TakeDamage(SETTINGS.attackDamage)
-	end
-
-	task.wait(1)
-
-	isAttacking = false
-end
-
--- // patrol selection
-
-local function getRandomPatrolPoint()
-
-	if #patrolPoints <= 0 then
-		return nil
-	end
-
-	return patrolPoints[math.random(1, #patrolPoints)]
-end
-
--- // patrol behavior
-
-local function patrol()
-
-	setState("patrol")
-
-	humanoid.WalkSpeed = SETTINGS.walkSpeed
-
-	local point = getRandomPatrolPoint()
-
-	if point then
-
-		debugPrint("walking to patrol point:", point.Name)
-
-		moveTo(point.Position)
-
-		-- small pause makes movement feel less robotic
-		task.wait(math.random(2,5))
-	else
-		task.wait(1)
-	end
-end
-
--- // chase behavior
-
-local function chasePlayer(player)
-
-	if not isPlayerAlive(player) then
-		target = nil
-		return
-	end
-
-	local char = player.Character
-	local hrp = char:FindFirstChild("HumanoidRootPart")
-
-	if not hrp then
-		return
-	end
-
-	setState("chasing")
-
-	humanoid.WalkSpeed = SETTINGS.chaseSpeed
-
-	local dist = (root.Position - hrp.Position).Magnitude
-
-	-- if target gets too far,
-	-- npc gives up eventually
-	if dist > SETTINGS.loseDistance then
-		debugPrint("lost target")
-
-		target = nil
-		return
-	end
-
-	-- npc remembers where it last saw the player
-	if hasLineOfSight(char) then
-		lastSeenPos = hrp.Position
-		lastSeenTime = tick()
-	end
-
-	if dist <= SETTINGS.attackDistance then
-		attackPlayer(player)
-	else
-		moveTo(hrp.Position)
-	end
-end
-
--- // searching
-
--- this helps the npc feel less dumb.
--- instead of instantly forgetting the player,
--- it checks the last known spot first.
-local function searchLastPosition()
-
-	if not lastSeenPos then
-		return
-	end
-
-	setState("searching")
-
-	humanoid.WalkSpeed = SETTINGS.walkSpeed
-
-	debugPrint("checking last seen position")
-
-	moveTo(lastSeenPos)
-
-	task.wait(2)
-
-	if tick() - lastSeenTime >= SETTINGS.memoryTime then
-		lastSeenPos = nil
-	end
-end
-
--- // idle
-
-local function idle()
-	setState("idle")
-	task.wait(1)
-end
-
--- // heartbeat loop
-
--- mostly handles stuff that needs constant updating
-RunService.Heartbeat:Connect(function()
-
-	if humanoid.MoveDirection.Magnitude > 0 then
-		playFootstep()
-	end
-
-	-- making npc face the target constantly
-	-- looks better during chasing
-	if target and isPlayerAlive(target) then
-
-		local char = target.Character
-		local hrp = char:FindFirstChild("HumanoidRootPart")
-
-		if hrp then
-
-			local lookPos = Vector3.new(
-				hrp.Position.X,
-				root.Position.Y,
-				hrp.Position.Z
-			)
-
-			root.CFrame = CFrame.lookAt(root.Position, lookPos)
-		end
-	end
 end)
-
--- // stuck checking loop
-
-task.spawn(function()
-
-	while true do
-
-		task.wait(SETTINGS.stuckCheckDelay)
-
-		checkIfStuck()
-	end
-end)
-
--- // ambient sounds
-
--- i added this because complete silence
--- during patrols felt awkward in testing
--- these also dont work, you need to add your own. 
-local ambientSounds = {
-	"rbxassetid://9125719131",
-	"rbxassetid://9125721022",
-	"rbxassetid://9125723307"
-}
---- you might be asking if these dont work how did i get the id? i didnt. i just mashed random numbers.
-local function playAmbient()
-
-	local sound = Instance.new("Sound")
-
-	sound.SoundId = ambientSounds[math.random(1,#ambientSounds)]
-	sound.Volume = 0.5
-	sound.Parent = head
-
-	sound:Play()
-
-	Debris:AddItem(sound, 8)
-end
-
-task.spawn(function()
-
-	while true do
-
-		task.wait(math.random(15,35))
-
-		playAmbient()
-	end
-end)
-
--- // main ai loop
-
--- i tried using fewer loops originally,
--- but separating behavior logic ended up cleaner
-task.spawn(function()
-
-	while true do
-
-		task.wait(0.1)
-
-		local closest = getClosestPlayer()
-
-		if closest then
-
-			local char = closest.Character
-
-			if char and hasLineOfSight(char) then
-				target = closest
-			end
-		end
-
-		if target then
-			chasePlayer(target)
-
-		elseif lastSeenPos then
-			searchLastPosition()
-
-		elseif #patrolPoints > 0 then
-			patrol()
-
-		else
-			idle()
-		end
-	end
-end)
-
--- // death handling
-
-humanoid.HealthChanged:Connect(function(health)
-
-	if health <= 0 then
-
-		setState("dead")
-
-		debugPrint("npc died")
-
-		return
-	end
-end)
-
-debugPrint("npc ai loaded")
-setState("ready")
-
-
-
-
------ THE END------
