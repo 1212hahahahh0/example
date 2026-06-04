@@ -1,3 +1,6 @@
+-- Connected Discord-Github
+-- dc : 1212hahahahh_
+-- roblox : 1212hahahahh0
 -- ok so this is the main server script lol
 -- handles sanity, events, all that stuff ik its a lot
 -- if i get denied again, i will cry. 
