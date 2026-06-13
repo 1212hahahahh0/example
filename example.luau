@@ -1,10 +1,7 @@
 -- Connected Discord-Github
 -- dc : 1212hahahahh_
 -- roblox : 1212hahahahh0
--- ok so this is the main server script lol
--- handles sanity, events, all that stuff ik its a lot
--- if i get denied again, i will cry. 
--- r oui c re us right neow
+-- this has to BE APPROVEDDDD!!!
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService") -- for smoooth animations n stuff
 local Debris = game:GetService("Debris") -- auto cleans up parts so server doesnt die lmao
@@ -14,7 +11,7 @@ local Players = game:GetService("Players") -- u kno wat this is
 local events = ReplicatedStorage:WaitForChild("EventsFolder")
 local sanityRemote = events:WaitForChild("SANITY") -- fires to client to update the sanity bar ui
 local jumpjump = events:WaitForChild("JUMPJUMP") -- triggers the jumpscare on client when sanity hits 0
-
+local baseplateTp = workspace:WaitForChild(BASEPLATE_TP_NAME)
 -- all the tuneable numbers in one place so u dont have 2 dig thru the whole script
 -- change these if u want 2 tweak balence or watever
 local REGEN_RATE = 1 -- sanity pts per tick, 1 per sec rn
@@ -230,7 +227,10 @@ events.Sword.Event:Connect(function()
 	local plrs = Players:GetPlayers()
 	if #plrs >= SWORD_MIN_PLAYERS then -- make sure theres at least 1 player lol
 		local chosen = plrs[math.random(1, #plrs)] -- pick rando player
-		local clone = game.ServerStorage.Items.Sword:Clone() -- clone from serverstorage
+		local ServerStorage = game:GetService("ServerStorage")
+		local sword = ServerStorage:WaitForChild("Items"):WaitForChild("Sword")
+			local clone = sword:Clone()
+			-- clone from serverstorage
 		clone.Parent = chosen.Backpack -- drop it in their backpack, they get it instantly
 
 		destroyAfter(clone, EVENT_DURATION) -- sword disappears after 30 secs
@@ -260,7 +260,7 @@ events.MeteorShower.Event:Connect(function()
 		clone.Position = Vector3.new(randomX, pos.Y + METEOR_HEIGHT_OFFSET, randomZ)
 
 		-- set downward velocity so it actually falls, physics handles the rest
-		if clone:IsA("BasePart") then
+		if clone and clone:IsA("BasePart")  then
 			clone.AssemblyLinearVelocity = Vector3.new(0, METEOR_SPEED, 0)
 		end
 
@@ -268,7 +268,7 @@ events.MeteorShower.Event:Connect(function()
 		-- can happen if it touches 2 parts in same frame
 		local exploded = false
 		clone.Touched:Connect(function(hit)
-			if exploded or not hit:IsDescendantOf(workspace) then return end -- skip if already blew or hit smth outside workspace
+			if exploded or not hit or not hit:IsDescendantOf(workspace) then return end -- skip if already blew or hit smth outside workspace
 			exploded = true
 			local explosion = Instance.new("Explosion")
 			explosion.Position = clone.Position
@@ -295,23 +295,31 @@ events.Tsunami.Event:Connect(function()
 	-- clone folder so original stays intact 4 future rounds ik i keep saying this
 	local folder = events:WaitForChild(TSUNAMI_FOLDER_NAME):Clone()
 	local wave = folder:FindFirstChild(WAVE_PART_NAME)
+if wave and wave:IsA("BasePart") then
+	wave.Anchored = true
+else
+	warn("Wave missing or invalid in TsunamiFolder")
+	return
+end
 	wave.Anchored = true -- anchored so physics doesnt mess w the tween
 	folder.Parent = workspace
 
 	-- tween the wave across the map on X axis
-	TweenService:Create(wave, makeTweenInfo(TSUNAMI_TWEEN_TIME), {
-		Position = Vector3.new(TSUNAMI_TARGET_X, 0, 0)
-	}):Play()
+	local originalPos = wave.Position
+
+TweenService:Create(wave, makeTweenInfo(TSUNAMI_TWEEN_TIME), {
+	Position = Vector3.new(TSUNAMI_TARGET_X, originalPos.Y, originalPos.Z)
+}):Play()
 
 	task.delay(EVENT_DURATION, function()
 		folder:Destroy() -- clean up the wave n folder
 		-- tp everyone back 2 spawn after wave is gone
 		for _, plr in Players:GetPlayers() do
-			local char = plr.Character
-			local hrp = char and char:FindFirstChild("HumanoidRootPart") -- need hrp 2 move them
+		local char = plr.Character
+		local hrp = char and char:FindFirstChild("HumanoidRootPart") -- need hrp 2 move them
 			if hrp then
 				task.wait(TSUNAMI_TELEPORT_DELAY) -- tiny stagger so they dont all tp same frame
-				hrp.CFrame = workspace.BaseplateTp.CFrame -- move em 2 the tp part
+				hrp.CFrame = baseplateTp.CFrame-- move em 2 the tp part
 			end
 		end
 	end)
